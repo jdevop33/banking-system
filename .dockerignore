@@ -1,0 +1,60 @@
+# VCS / CI
+.git
+.gitignore
+.github
+
+# Docker / compose (not needed inside the image)
+Dockerfile
+.dockerignore
+docker-compose*.yml
+
+# Secrets and local env (never bake into an image layer)
+.env
+.env.*
+!.env.example
+
+# Python caches / build artifacts
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.Python
+
+# Virtualenvs
+.venv/
+venv/
+env/
+ENV/
+
+# Local data, backups, collected static, uploads
+data/
+backups/
+db.sqlite3
+*.sqlite3
+staticfiles/
+media/
+
+# Celery local scheduler state
+celerybeat-schedule
+celerybeat.pid
+
+# Test / coverage / type caches
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.tox/
+.cache/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+*.log
+
+# Node (front-end tooling is CDN-based here, but keep it excluded regardless)
+node_modules/

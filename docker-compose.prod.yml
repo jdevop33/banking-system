@@ -1,0 +1,92 @@
+# Production stack for the shared Docker box (put Caddy in front of `web`).
+#
+#   cp .env.example .env      # set SECRET_KEY + ALLOWED_HOSTS, then:
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# One image (built from ./Dockerfile) runs three roles: web, celery worker, celery beat.
+# Redis is the broker/result backend. SQLite lives on the `app-data` named volume,
+# shared by web/worker/beat so migrations and interest transactions see one database.
+
+name: banking-system
+
+x-app: &app
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: banking-system:latest
+  restart: unless-stopped
+  env_file:
+    - path: .env
+      required: false
+  environment: &app-env
+    DJANGO_SETTINGS_MODULE: banking_system.settings
+    DEBUG: "0"
+    SQLITE_PATH: /data/db.sqlite3
+    STATIC_ROOT: /app/staticfiles
+    CELERY_BROKER_URL: redis://redis:6379/0
+    CELERY_RESULT_BACKEND: redis://redis:6379/0
+  volumes:
+    - app-data:/data
+  depends_on:
+    redis:
+      condition: service_healthy
+
+services:
+  redis:
+    # Pinned by digest (not just the mutable 7-alpine tag) so rebuilds are reproducible.
+    image: redis:7-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # Web: migrate + collectstatic, then gunicorn on :8000. Uses the image's default
+  # command and its HTTP HEALTHCHECK. Only this service publishes a port, and it is
+  # bound to loopback (127.0.0.1) so plaintext gunicorn is never reachable from off-box:
+  # the co-located Caddy reverse proxy terminates TLS and is the only path in.
+  web:
+    <<: *app
+    ports:
+      - "127.0.0.1:8000:8000"
+
+  # Celery worker: runs the interest-calculation task. Waits for the web service so
+  # migrations have created the tables before any task touches the database.
+  worker:
+    <<: *app
+    command: celery -A banking_system worker -l info
+    depends_on:
+      redis:
+        condition: service_healthy
+      web:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A banking_system inspect ping || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # Celery beat: fires calculate_interest on the schedule in banking_system/celery.py.
+  # Schedule/pid files go to /tmp so the non-root user can always write them.
+  beat:
+    <<: *app
+    command: celery -A banking_system beat -l info --schedule=/tmp/celerybeat-schedule --pidfile=/tmp/celerybeat.pid
+    depends_on:
+      redis:
+        condition: service_healthy
+      web:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/celerybeat.pid"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  redis-data:
+  app-data:

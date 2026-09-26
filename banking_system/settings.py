@@ -10,7 +10,19 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/3.1/ref/settings/
 """
 
+import os
 from pathlib import Path
+
+from django.core.exceptions import ImproperlyConfigured
+
+
+def _env_bool(name, default):
+    return os.environ.get(name, str(default)).strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+def _env_list(name, default=''):
+    return [item.strip() for item in os.environ.get(name, default).split(',') if item.strip()]
+
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve(strict=True).parent.parent
@@ -19,13 +31,45 @@ BASE_DIR = Path(__file__).resolve(strict=True).parent.parent
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/3.1/howto/deployment/checklist/
 
-# SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'po0172$69b@78ps4v^uhfxu6q--8ko7kpp7rbz420s_3w#sir%'
-
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+# Defaults to False so a dropped or missing env var can never expose Django debug
+# pages (stack traces, settings, SQL) in production. Opt in locally with DEBUG=1.
+DEBUG = _env_bool('DEBUG', False)
 
-ALLOWED_HOSTS = []
+# SECURITY WARNING: keep the secret key used in production secret!
+# Never commit a key or bake one into an image. In production (DEBUG=False) the app
+# hard-fails unless SECRET_KEY is supplied via the environment, so it can never boot
+# on a shared or previously-leaked key. In local development (DEBUG=1) an ephemeral
+# key is generated per process instead.
+SECRET_KEY = os.environ.get('SECRET_KEY')
+if not SECRET_KEY:
+    if DEBUG:
+        from django.core.management.utils import get_random_secret_key
+
+        SECRET_KEY = get_random_secret_key()
+    else:
+        raise ImproperlyConfigured(
+            'SECRET_KEY environment variable is required when DEBUG is False.'
+        )
+
+# Comma-separated hosts via ALLOWED_HOSTS env; localhost stays allowed for health checks.
+ALLOWED_HOSTS = _env_list('ALLOWED_HOSTS') + ['localhost', '127.0.0.1']
+
+# Hosts trusted for CSRF when running behind a TLS-terminating reverse proxy (e.g. Caddy).
+CSRF_TRUSTED_ORIGINS = _env_list('CSRF_TRUSTED_ORIGINS')
+
+# Trust the reverse proxy's X-Forwarded-Proto so Django recognises HTTPS requests.
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+
+# Cookie / transport hardening for production. Enabled whenever DEBUG is False so
+# session and CSRF cookies are only ever sent over HTTPS, session cookies are never
+# exposed to JavaScript, and plain-HTTP requests are redirected to HTTPS. The reverse
+# proxy (Caddy) terminates TLS and forwards X-Forwarded-Proto, trusted above.
+if not DEBUG:
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SESSION_COOKIE_HTTPONLY = True
+    SECURE_SSL_REDIRECT = True
 
 
 # Application definition
@@ -83,7 +127,10 @@ WSGI_APPLICATION = 'banking_system.wsgi.application'
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        # SQLITE_PATH keeps the file on a mounted volume so data survives restarts;
+        # the longer timeout eases lock contention when web/worker/beat share it.
+        'NAME': os.environ.get('SQLITE_PATH', str(BASE_DIR / 'db.sqlite3')),
+        'OPTIONS': {'timeout': 20},
     }
 }
 
@@ -125,6 +172,16 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/3.1/howto/static-files/
 
 STATIC_URL = '/static/'
+# collectstatic gathers assets here; served directly by gunicorn via WhiteNoise.
+STATIC_ROOT = os.environ.get('STATIC_ROOT', str(BASE_DIR / 'staticfiles'))
+
+# Serve collected static files from gunicorn via WhiteNoise when it is installed
+# (production image). Skipped transparently in a local dev env without WhiteNoise.
+try:
+    import whitenoise  # noqa: F401
+    MIDDLEWARE.insert(1, 'whitenoise.middleware.WhiteNoiseMiddleware')
+except ImportError:
+    pass
 
 ACCOUNT_NUMBER_START_FROM = 1000000000
 MINIMUM_DEPOSIT_AMOUNT = 10
@@ -133,9 +190,9 @@ MINIMUM_WITHDRAWAL_AMOUNT = 10
 # Login redirect
 LOGIN_REDIRECT_URL = 'home'
 
-# Celery Settings
-CELERY_BROKER_URL = 'redis://localhost:6379'
-CELERY_RESULT_BACKEND = 'redis://localhost:6379'
+# Celery Settings (broker/backend host comes from the environment in containers)
+CELERY_BROKER_URL = os.environ.get('CELERY_BROKER_URL', 'redis://localhost:6379')
+CELERY_RESULT_BACKEND = os.environ.get('CELERY_RESULT_BACKEND', 'redis://localhost:6379')
 CELERY_ACCEPT_CONTENT = ['application/json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
