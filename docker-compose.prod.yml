@@ -3,7 +3,12 @@
 #   cp .env.example .env      # set SECRET_KEY + ALLOWED_HOSTS, then:
 #   docker compose -f docker-compose.prod.yml up -d --build
 #
-# One image (built from ./Dockerfile) runs three roles: web, celery worker, celery beat.
+# After the first deploy, create the admin login (migrations already seed the default
+# Savings and Current account types, so sign-up works without it):
+#   docker compose -f docker-compose.prod.yml exec web python manage.py createsuperuser
+#
+# One image (built from ./Dockerfile) runs three roles: web, celery worker, celery beat,
+# plus a one-shot `migrate` job that all three wait for.
 # Redis is the broker/result backend. SQLite lives on the `app-data` named volume,
 # shared by web/worker/beat so migrations and interest transactions see one database.
 
@@ -30,6 +35,8 @@ x-app: &app
   depends_on:
     redis:
       condition: service_healthy
+    migrate:
+      condition: service_completed_successfully
 
 services:
   redis:
@@ -44,7 +51,18 @@ services:
       timeout: 3s
       retries: 5
 
-  # Web: migrate + collectstatic, then gunicorn on :8000. Uses the image's default
+  # One-shot: apply migrations, then exit. web, worker and beat start only after it
+  # exits 0, so no process ever touches a table before it exists, and a failed
+  # migration stops the deploy instead of serving a half-migrated database.
+  migrate:
+    <<: *app
+    command: python manage.py migrate --noinput
+    restart: "no"
+    depends_on: {}
+    healthcheck:
+      disable: true
+
+  # Web: collectstatic, then gunicorn on :8000. Uses the image's default
   # command and its HTTP HEALTHCHECK. Only this service publishes a port, and it is
   # bound to loopback (127.0.0.1) so plaintext gunicorn is never reachable from off-box:
   # the co-located Caddy reverse proxy terminates TLS and is the only path in.
@@ -53,16 +71,11 @@ services:
     ports:
       - "127.0.0.1:8000:8000"
 
-  # Celery worker: runs the interest-calculation task. Waits for the web service so
-  # migrations have created the tables before any task touches the database.
+  # Celery worker: runs the interest-calculation task, once a month. One process is
+  # plenty; the default (one per CPU) only costs RAM on a shared box.
   worker:
     <<: *app
-    command: celery -A banking_system worker -l info
-    depends_on:
-      redis:
-        condition: service_healthy
-      web:
-        condition: service_started
+    command: celery -A banking_system worker -l info --concurrency=1
     healthcheck:
       test: ["CMD-SHELL", "celery -A banking_system inspect ping || exit 1"]
       interval: 30s
@@ -72,14 +85,12 @@ services:
 
   # Celery beat: fires calculate_interest on the schedule in banking_system/celery.py.
   # Schedule/pid files go to /tmp so the non-root user can always write them.
+  # The pidfile is removed before start: a restart reuses the container, so after an
+  # unclean exit (kill, OOM, host crash) the old file still says pid 1, which is beat
+  # itself again, and beat would refuse to start forever.
   beat:
     <<: *app
-    command: celery -A banking_system beat -l info --schedule=/tmp/celerybeat-schedule --pidfile=/tmp/celerybeat.pid
-    depends_on:
-      redis:
-        condition: service_healthy
-      web:
-        condition: service_started
+    command: sh -c "rm -f /tmp/celerybeat.pid && exec celery -A banking_system beat -l info --schedule=/tmp/celerybeat-schedule --pidfile=/tmp/celerybeat.pid"
     healthcheck:
       test: ["CMD-SHELL", "test -f /tmp/celerybeat.pid"]
       interval: 30s
