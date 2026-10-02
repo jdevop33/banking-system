@@ -1,3 +1,5 @@
+from dateutil.relativedelta import relativedelta
+from django.db import transaction
 from django.utils import timezone
 
 from celery.decorators import task
@@ -8,14 +10,20 @@ from transactions.models import Transaction
 
 
 @task(name="calculate_interest")
+@transaction.atomic
 def calculate_interest():
+    now = timezone.now()
+    # interest_start_date keeps the deposit's day, but this runs on the 1st:
+    # an account is due from its start month, not its start day.
+    next_month = (now + relativedelta(months=+1)).date().replace(day=1)
+
     accounts = UserBankAccount.objects.filter(
         balance__gt=0,
-        interest_start_date__gte=timezone.now(),
+        interest_start_date__lt=next_month,
         initial_deposit_date__isnull=False
     ).select_related('account_type')
 
-    this_month = timezone.now().month
+    this_month = now.month
 
     created_transactions = []
     updated_accounts = []
@@ -31,7 +39,8 @@ def calculate_interest():
             transaction_obj = Transaction(
                 account=account,
                 transaction_type=INTEREST,
-                amount=interest
+                amount=interest,
+                balance_after_transaction=account.balance
             )
             created_transactions.append(transaction_obj)
             updated_accounts.append(account)

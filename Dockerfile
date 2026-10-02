@@ -55,9 +55,14 @@ EXPOSE 8000
 
 # Web-oriented health check (the image's primary role). The worker and beat services
 # override this with their own checks in docker-compose.prod.yml.
+# The probe says it came through the TLS proxy (X-Forwarded-Proto, trusted by
+# SECURE_PROXY_SSL_HEADER): with DEBUG off, SECURE_SSL_REDIRECT would otherwise answer
+# plain HTTP with a redirect to https://127.0.0.1, which gunicorn cannot serve.
+# http.client neither follows redirects nor raises on 4xx/5xx; any status below 500 is healthy.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 \
-    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/', timeout=4).status < 500 else 1)" || exit 1
+    CMD python -c "import http.client,sys; c=http.client.HTTPConnection('127.0.0.1', 8000, timeout=4); c.request('GET', '/', headers={'X-Forwarded-Proto': 'https'}); sys.exit(0 if c.getresponse().status < 500 else 1)" || exit 1
 
-# Default (web) command: apply migrations, collect static, then serve with gunicorn.
-# docker-compose.prod.yml overrides `command` for the worker and beat services.
-CMD ["sh", "-c", "python manage.py migrate --noinput && python manage.py collectstatic --noinput && exec gunicorn banking_system.wsgi:application --bind 0.0.0.0:8000 --workers 3 --timeout 60 --access-logfile - --error-logfile -"]
+# Default (web) command: collect static, then serve with gunicorn. Migrations are
+# the one-shot `migrate` service in docker-compose.prod.yml, which web, worker and
+# beat all wait for; that file also overrides `command` for the worker and beat.
+CMD ["sh", "-c", "python manage.py collectstatic --noinput && exec gunicorn banking_system.wsgi:application --bind 0.0.0.0:8000 --workers 3 --timeout 60 --access-logfile - --error-logfile -"]
