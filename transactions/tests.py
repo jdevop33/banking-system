@@ -53,6 +53,36 @@ class CalculateInterestTests(TestCase):
         self.assertEqual(interest.amount, Decimal('10.00'))
         self.assertEqual(interest.balance_after_transaction, Decimal('1010.00'))
 
+    def test_interest_is_paid_in_the_start_month_whatever_the_day(self):
+        # A deposit on the 15th sets a start date on the 15th, but the task
+        # runs on the 1st: the start month itself must still be paid.
+        account = self.make_account(3, datetime.date(2026, 6, 15))
+
+        self.run_task()
+
+        account.refresh_from_db()
+        self.assertEqual(account.balance, Decimal('1010.00'))
+
+    def test_no_interest_in_the_start_month_of_a_later_year(self):
+        account = self.make_account(4, datetime.date(2027, 6, 15))
+
+        self.run_task()
+
+        account.refresh_from_db()
+        self.assertEqual(account.balance, Decimal('1000.00'))
+
+    def test_a_failure_leaves_no_balance_credited(self):
+        account = self.make_account(5, datetime.date(2026, 3, 1))
+
+        with mock.patch.object(
+            Transaction.objects, 'bulk_create', side_effect=RuntimeError
+        ):
+            with self.assertRaises(RuntimeError):
+                self.run_task()
+
+        account.refresh_from_db()
+        self.assertEqual(account.balance, Decimal('1000.00'))
+
     def test_no_interest_before_the_start_date(self):
         # June is one of this account's interest months, but its start is next year.
         account = self.make_account(2, datetime.date(2027, 1, 1))
